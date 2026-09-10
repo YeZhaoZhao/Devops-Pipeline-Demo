@@ -1,0 +1,110 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: docker.io/${{ vars.DOCKER_USERNAME }}/pipeline-demo-hub
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      tag: ${{ steps.build.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打印环境变量
+        run: env
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: 安装依赖并编译打包
+        run: |
+          go mod download
+          go vet ./...
+          go build -ldflags "-s -w" -o app .
+
+      # tag 格式 YYYYmmddHHMMSS，用北京时间（runner 默认是 UTC）
+      - name: 构建镜像并打 tag
+        id: build
+        run: |
+          TAG=$(TZ='Asia/Shanghai' date +%Y%m%d%H%M%S)
+          echo "Image tag: $TAG"
+          docker build -t "${{ env.IMAGE_NAME }}:$TAG" .
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
+
+      # 用户名取自 Repository Variables，密码取自 Secrets
+      - name: 登录 Docker Hub
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ vars.DOCKER_USERNAME }}" --password-stdin
+
+      - name: 推送镜像
+        run: docker push "${{ env.IMAGE_NAME }}:${{ steps.build.outputs.tag }}"
+
+      - name: 导出 tar
+        run: docker save -o image.tar "${{ env.IMAGE_NAME }}:${{ steps.build.outputs.tag }}"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tar
+
+      # 在 run 页面的 Summary 里显示最终镜像版本
+      - name: 输出结果
+        run: |
+          echo "Image: ${{ env.IMAGE_NAME }}:${{ steps.build.outputs.tag }}"
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          ## CI 构建结果
+          Image: ${{ env.IMAGE_NAME }}:${{ steps.build.outputs.tag }}
+          EOF
+
+  # DEV 环境，追加本环境 suffix 后重新打 tag
+  cd-dev:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: DEV
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - name: 载入镜像
+        run: docker load -i image.tar
+
+      - name: 追加 DEV suffix 打 tag
+        run: |
+          docker tag "${{ needs.ci.outputs.image }}:${{ needs.ci.outputs.tag }}" \
+            "${{ needs.ci.outputs.image }}:${{ needs.ci.outputs.tag }}${{ vars.suffix }}"
+
+      - name: 列出本地镜像
+        run: docker images
+
+  # PROD：串在 cd-dev 之后，通过 PROD 环境的 Required reviewers 做人工审批
+  cd-prod:
+    needs: [ci, cd-dev]
+    runs-on: ubuntu-latest
+    environment: PROD
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - name: 载入镜像
+        run: docker load -i image.tar
+
+      - name: 追加 PROD suffix 打 tag
+        run: |
+          docker tag "${{ needs.ci.outputs.image }}:${{ needs.ci.outputs.tag }}" \
+            "${{ needs.ci.outputs.image }}:${{ needs.ci.outputs.tag }}${{ vars.suffix }}"
+
+      - name: 列出本地镜像
+        run: docker images
+        
