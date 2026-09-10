@@ -31,7 +31,7 @@ jobs:
           go vet ./...
           go build -ldflags "-s -w" -o app .
 
-      # tag 格式 YYYYmmddHHMMSS，用北京时间（runner 默认是 UTC）
+      # tag 格式 YYYYmmddHHMMSS
       - name: 构建镜像并打 tag
         id: build
         run: |
